@@ -1,0 +1,67 @@
+{
+  "catalog_id": "billings_2025-08-29",
+  "db_name": "billings",
+  "dialect": "oracle",
+  "last_refreshed": "2025-08-29T00:00:00Z",
+  "vocab_hints": ["invoice", "billing", "merchant", "billing", "period"],
+  "schemas": [
+    {
+      "name": "public",
+      "tables": [
+        {
+          "name": "invoices",
+          "row_estimate": 12450000,
+          "columns": [
+            { "name": "invoice_id", "type": "uuid", "role": "pk", "description": "Unique invoice identifier." },
+            { "name": "merchant_id", "type": "text", "role": "fk", "description": "Merchant identifier.", "synonyms": ["mid", "merchant_code"], "join_hint": "public.merchants(merchant_id)" },
+            { "name": "issued_at", "type": "timestamp", "role": "timestamp", "description": "Invoice creation time (UTC).", "format": "ISO8601", "timezone": "UTC" },
+            { "name": "amount", "type": "numeric", "role": "measure", "description": "Invoice total amount.", "units": "currency", "default_agg": "sum" },
+            { "name": "status", "type": "text", "role": "dimension", "description": "Invoice status.", "enum_values": ["draft","posted","paid","void"] }
+          ],
+          "joins": [
+            {
+              "to": "public.merchants",
+              "on": [{ "from_col": "merchant_id", "to_col": "merchant_id" }],
+              "cardinality": "N:1",
+              "desc": "Each invoice belongs to one merchant."
+            }
+          ],
+          "sample_predicates": ["issued_at >= NOW() - interval '90 days'", "status IN ('posted','paid')"]
+        },
+        {
+          "name": "partner_billings",
+          "row_estimate": 2100000,
+          "columns": [
+            { "name": "id", "type": "uuid", "role": "pk", "description": "Statement identifier." },
+            { "name": "merchant_id", "type": "text", "role": "fk", "description": "Merchant owner of the billing.", "join_hint": "public.merchants(merchant_id)" },
+            { "name": "period_month", "type": "text", "role": "dimension", "description": "Statement period in YYYY-MM.", "format": "YYYY-MM" },
+            { "name": "status", "type": "text", "role": "dimension", "description": "Statement lifecycle state.", "enum_values": ["open","posted","archived"] }
+          ],
+          "joins": [
+            {
+              "to": "public.merchants",
+              "on": [{ "from_col": "merchant_id", "to_col": "merchant_id" }],
+              "cardinality": "N:1",
+              "desc": "Statement belongs to one merchant."
+            },
+            {
+              "to": "public.invoices",
+              "on": [{ "from_col": "merchant_id", "to_col": "merchant_id" }],
+              "cardinality": "1:N",
+              "desc": "All partner billings for a merchant relate to many invoices."
+            }
+          ],
+          "sample_predicates": ["period_month >= to_char(date_trunc('month', now()) - interval '3 months','YYYY-MM')"]
+        },
+        {
+          "name": "merchants",
+          "row_estimate": 100000,
+          "columns": [
+            { "name": "merchant_id", "type": "text", "role": "pk", "description": "Merchant unique code.", "synonyms": ["mid"] },
+            { "name": "merchant_name", "type": "text", "role": "dimension", "description": "Display name of the merchant." }
+          ]
+        }
+      ]
+    }
+  ]
+}

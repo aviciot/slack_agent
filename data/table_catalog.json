@@ -1,0 +1,87 @@
+[
+  {
+    "id": "workflow_run_statistics_agent",
+    "name": "workflow_run_statistics_agent",
+    "purpose": "Per-workflow run statistics (start/end times, duration, status).",
+    "tags": ["workflows", "performance", "sla", "runs"],
+    "possible_questions": [
+      "which workflows ran longer than X minutes",
+      "what is the average runtime of workflow X",
+      "which workflows failed in the last week",
+      "when did workflow X last run",
+      "what is the status of workflow X's latest run",
+      "which workflows started after date Y"
+    ],
+    "columns": [
+      {"name": "workflow_name", "type": "TEXT", "desc": "Workflow identifier", "synonyms": ["wf", "name"]},
+      {"name": "start_time", "type": "TEXT", "desc": "Run start (ISO)", "synonyms": ["started", "from"]},
+      {"name": "end_time", "type": "TEXT", "desc": "Run end (ISO)", "synonyms": ["finished", "to"]},
+      {"name": "time_in_min", "type": "REAL", "desc": "Duration (minutes)", "synonyms": ["latency", "runtime", "elapsed"]},
+      {"name": "status", "type": "TEXT", "desc": "Run status", "synonyms": ["result", "success", "fail"]},
+      {"name": "run_id", "type": "TEXT", "desc": "Unique run identifier", "synonyms": ["execution_id"]}
+    ],
+    "joins": [
+      {
+        "to": "session_run_statistics_agent",
+        "on": "workflow_name",
+        "cardinality": "1:N",
+        "desc": "Sessions belong to a workflow; join via workflow_name."
+      }
+    ]
+  },
+  {
+    "id": "session_run_statistics_agent",
+    "name": "session_run_statistics_agent",
+    "purpose": "Per-session run statistics under a workflow.",
+    "tags": ["sessions", "performance", "runs"],
+    "possible_questions": [
+      "which sessions ran longer than X minutes",
+      "what is the average runtime of session X",
+      "which sessions failed for workflow Y",
+      "when did session X last run",
+       "what is the heaviest session for workflow x",
+       "for workflow x ,which session run longest time ",
+      "what is the status of session X's latest run",
+      "which sessions started after date Y for workflow Z"
+    ],
+    "columns": [
+      {"name": "workflow_name", "type": "TEXT", "desc": "Parent workflow name"},
+      {"name": "session_name", "type": "TEXT", "desc": "Session identifier", "synonyms": ["task", "session"]},
+      {"name": "start_time", "type": "TEXT", "desc": "Run start (ISO)"},
+      {"name": "end_time", "type": "TEXT", "desc": "Run end (ISO)"},
+      {"name": "time_in_min", "type": "REAL", "desc": "Duration (minutes)", "synonyms": ["latency", "runtime"]},
+      {"name": "status", "type": "TEXT", "desc": "Run status"},
+      {"name": "run_id", "type": "TEXT", "desc": "Simple session run identifier"}
+    ],
+    "joins": []
+  },
+  {
+    "id": "informatica_related_tables",
+    "name": "informatica_related_tables",
+    "purpose": "Inventory of Informatica objects and the tables they reference. Stand-alone lineage source (no joins).",
+    "tags": ["lineage", "catalog", "impact-analysis", "where-used"],
+    "possible_questions": [
+      "which workflows use table X",
+      "where is table X used",
+      "mappings that read from table X",
+      "mappings that write to table X",
+      "workflows using table X as source",
+      "workflows using table X as target"
+    ],
+    "columns": [
+      {"name": "id", "type": "INTEGER", "desc": "Row id"},
+      {"name": "informatica_server", "type": "TEXT", "desc": "Repo/server name"},
+      {"name": "informatica_user", "type": "TEXT", "desc": "Repo user/owner"},
+      {"name": "folder_name", "type": "TEXT", "desc": "Repository folder", "synonyms": ["folder"]},
+      {"name": "workflow_id", "type": "TEXT", "desc": "Workflow identifier"},
+      {"name": "workflow_name", "type": "TEXT", "desc": "Workflow name", "synonyms": ["wf"]},
+      {"name": "session_name", "type": "TEXT", "desc": "Session name"},
+      {"name": "mapping_name", "type": "TEXT", "desc": "Mapping name"},
+      {"name": "source_name", "type": "TEXT", "desc": "Referenced source table", "synonyms": ["source", "reads", "from_table"]},
+      {"name": "target_name", "type": "TEXT", "desc": "Referenced target table", "synonyms": ["target", "writes", "to_table"]},
+      {"name": "attr_value", "type": "TEXT", "desc": "Auxiliary text"},
+      {"name": "created_date", "type": "TEXT", "desc": "Created timestamp"},
+      {"name": "updated_date", "type": "TEXT", "desc": "Last updated timestamp"}
+    ]
+  }
+]

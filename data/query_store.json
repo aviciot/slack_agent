@@ -1,0 +1,73 @@
+[
+  {
+    "qs_id": "QS_slow_workflows_top_n_windowed",
+    "intent": "slow_workflows_top_n_windowed",
+    "title": "Top-N slowest workflows in a time window",
+    "db_name": "informatica",
+    "dialect": "sqlite",
+    "tables_touched": ["workflow_run_statistics_agent"],
+    "nl_paraphrases": [
+      "Show me the top 5 slowest workflows in the last 30 days",
+      "Which workflows had the longest run times this week? Top 10 please",
+      "Top slow workflows over a period"
+    ],
+    "params_schema": {
+      "start": { "type": "datetime", "required": false },
+      "end":   { "type": "datetime", "required": false },
+      "limit": { "type": "integer",  "required": true, "default": 10 }
+    },
+    "sql_template": "SELECT workflow_name, MAX(time_in_min) AS max_duration\nFROM workflow_run_statistics_agent\nWHERE (:start IS NULL OR start_time >= :start)\n  AND (:end   IS NULL OR start_time <= :end)\nGROUP BY workflow_name\nORDER BY max_duration DESC\nLIMIT :limit;"
+  },
+  {
+    "qs_id": "QS_total_workflows_last_hours",
+    "intent": "total_workflows_last_hours",
+    "title": "Count distinct workflows in last N hours",
+    "db_name": "informatica",
+    "dialect": "sqlite",
+    "tables_touched": ["workflow_run_statistics_agent"],
+    "nl_paraphrases": [
+      "How many distinct workflows ran in the last 48 hours?",
+      "Count unique workflows in past N hours"
+    ],
+    "params_schema": {
+      "hours": { "type": "integer", "required": true, "default": 24 }
+    },
+    "sql_template": "SELECT COUNT(DISTINCT workflow_name) AS total_workflows\nFROM workflow_run_statistics_agent\nWHERE start_time >= DATETIME('now', '-' || :hours || ' hours');"
+  },
+  {
+    "qs_id": "QS_tables_used_by_workflow",
+    "intent": "tables_used_by_workflow",
+    "title": "Tables used by a workflow (source or target)",
+    "db_name": "informatica",
+    "dialect": "sqlite",
+    "tables_touched": ["informatica_related_tables"],
+    "nl_paraphrases": [
+      "List all tables used by workflow 'wf_CSF_XML_to_WAY4'",
+      "What tables does a given workflow touch?"
+    ],
+    "params_schema": {
+      "workflow_name": { "type": "string", "required": true }
+    },
+    "sql_template": "SELECT DISTINCT t\nFROM (\n  SELECT TRIM(source_name) AS t FROM informatica_related_tables\n    WHERE UPPER(workflow_name) = UPPER(:workflow_name) AND source_name IS NOT NULL\n  UNION\n  SELECT TRIM(target_name) AS t FROM informatica_related_tables\n    WHERE UPPER(workflow_name) = UPPER(:workflow_name) AND target_name IS NOT NULL\n)\nORDER BY t;"
+  },
+  {
+    "qs_id": "QS_statements_by_status_merchant",
+    "intent": "statements_count_by_merchant_status",
+    "title": "Statement counts by merchant and status for a period",
+    "db_name": "statements",
+    "dialect": "oracle",
+    "tables_touched": ["public.partner_statements", "public.merchants"],
+    "nl_paraphrases": [
+      "How many statements per merchant this month and their status?",
+      "Statement counts by merchant and status for a given period",
+      "statements count by merchant for 2025-07 by status"
+    ],
+    "params_schema": {
+      "period_month": { "type": "string", "format": "YYYY-MM", "required": true },
+      "merchant_id":  { "type": "string", "required": false },
+      "status":       { "type": "string", "required": false },
+      "limit":        { "type": "integer", "required": false, "default": 100 }
+    },
+    "sql_template": "SELECT\n  ps.merchant_id,\n  m.merchant_name,\n  ps.status,\n  COUNT(*) AS statements_count\nFROM public.partner_statements ps\nJOIN public.merchants m USING (merchant_id)\nWHERE ps.period_month = :period_month\n  AND (:merchant_id IS NULL OR ps.merchant_id = :merchant_id)\n  AND (:status IS NULL OR ps.status = :status)\nGROUP BY ps.merchant_id, m.merchant_name, ps.status\nORDER BY statements_count DESC\nFETCH FIRST :limit ROWS ONLY"
+  }
+]

@@ -1,0 +1,232 @@
+services:
+  # Main API Service
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: ds_agent_api
+    env_file: .env
+    dns: [1.1.1.1, 8.8.8.8]
+    ports: ["8090:8090"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8090/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      #- ./catalog:/app/catalog:ro
+      - ./config:/app/config:ro
+    command: >
+      python -m uvicorn src.app.main:app
+      --host 0.0.0.0
+      --port ${PORT:-8090}
+      --workers ${UVICORN_WORKERS:-2}
+      --reload
+      --reload-dir /app/src
+    cpus: "2"
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [stack]
+
+  # Background Worker (keeps API responsive; safe to run or disable)
+  worker:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: ds_agent_worker
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      #- ./catalog:/app/catalog:ro
+      - ./config:/app/config:ro
+    command: ["python", "-m", "src.worker_stub"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [stack]
+  catalog-seed:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    command: ["python", "/app/src/tools/seed_tables_from_json.py"]
+    environment:
+      - REDIS_URL=${REDIS_URL}      
+      - OLLAMA_HOST=${LOCAL_LLM_URL:-http://ollama:11434}
+      - EMBED_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      - EMBED_DIM=${EMBED_DIM:-0}
+      - RESET=1
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: "no"
+    networks: [stack]
+
+  queries-seed:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    command: ["python", "/app/src/tools/seed_queries_from_json.py"]
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - QUERY_STORE_JSON=/app/data/query_store.json
+      - OLLAMA_HOST=${LOCAL_LLM_URL:-http://ollama:11434}
+      - EMBED_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      - EMBED_DIM=${EMBED_DIM:-0}
+      - DEFAULT_DB_NAME=statements     # <— add ONLY if your JSON lacks db_name per record
+      - RESET=1
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: "no"
+    networks: [stack]
+
+
+
+  # Ollama Model Server
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    environment:
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE}
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL}
+      - OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS}
+    ports: ["11434:11434"]
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    cpus: "${OLLAMA_CPUS}"
+    mem_limit: "${OLLAMA_MEM_LIMIT}"
+    memswap_limit: "${OLLAMA_MEMSWAP_LIMIT}"
+    networks: [stack]
+
+  # Ollama Model Puller (one-off)  ← pulls the required model(s)
+  ollama-init:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: ollama_init
+    env_file: .env
+    depends_on:
+      ollama:
+        condition: service_healthy
+    command: ["python", "/app/src/tools/pull_models.py"]
+    volumes:
+      - ./src:/app/src
+      - ollama_models:/root/.ollama
+    restart: "no"
+    networks: [stack]
+
+  # Ollama Model Warmer (one-off)  ← warms the model in memory
+  ollama-warm:
+    image: curlimages/curl:8.8.0
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - MODEL=${OLLAMA_MODEL:-qwen2.5-coder:7b-instruct}
+      - THREADS=${WARM_THREADS:-8}
+      - KEEP=${OLLAMA_KEEP_ALIVE:-24h}
+    entrypoint: ["/bin/sh","-lc"]
+    command: |
+      set -e
+      echo "Warming model: $MODEL (threads=$THREADS keep=$KEEP)"
+      curl -fsS -X POST http://ollama:11434/api/generate \
+        -H "Content-Type: application/json" \
+        -d "{\"model\":\"$MODEL\",\"prompt\":\"ok\",\"stream\":false,
+            \"keep_alive\":\"$KEEP\",
+            \"options\":{\"num_predict\":1,\"num_thread\":$THREADS}}" \
+        | tail -n 1
+    restart: "no"
+    networks: [stack]
+
+# docker-compose.yml
+  ollama-warm-embed:
+    image: curlimages/curl:8.8.0
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+    entrypoint: ["/bin/sh","-lc"]
+    command: |
+      set -e
+      echo "Warming embedding model: $EMBED_MODEL"
+      curl -fsS -X POST http://ollama:11434/api/embeddings \
+        -H "Content-Type: application/json" \
+        -d "{\"model\":\"$EMBED_MODEL\",\"prompt\":\"warmup\"}" \
+        | tail -n 1
+    restart: "no"
+    networks: [stack]
+
+
+
+  # Redis Stack (with browser UI at :8001)
+  redis:
+    image: redis/redis-stack:latest
+    container_name: ds_redis
+    ports:
+      - "6379:6379"
+      - "8001:8001"
+    environment:
+      - REDIS_ARGS=--appendonly yes --save 900 1 --save 300 10 --save 60 10000 --requirepass ${REDIS_PASSWORD:-devpass}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-devpass} ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis_data:/data
+    networks: [stack]
+
+  # ngrok tunnel (optional for Slack dev)
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: ds_ngrok
+    depends_on:
+      api:
+        condition: service_healthy
+    command:
+      - "http"
+      - "--authtoken"
+      - "${AUTHTOKEN}"
+      - "--region"
+      - "${NGROK_REGION:-eu}"
+      - "--log"
+      - "stdout"
+      - "api:8090"
+    environment:
+      - NGROK_AUTHTOKEN=${AUTHTOKEN}
+    networks: [stack]
+    restart: unless-stopped
+
+volumes:
+  ollama_models:
+  redis_data:
+
+networks:
+  stack:
+    driver: bridge

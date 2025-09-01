@@ -1,0 +1,58 @@
+{
+  "catalog_id": "informatica_2025-08-29",
+  "db_name": "informatica",
+  "dialect": "sqlite",
+  "last_refreshed": "2025-08-29T00:00:00Z",
+  "vocab_hints": ["workflow", "session", "mapping", "lineage", "informatica"],
+  "schemas": [
+    {
+      "name": "main",
+      "tables": [
+        {
+          "name": "workflow_run_statistics_agent",
+          "row_estimate": 5000000,
+          "columns": [
+            { "name": "workflow_name", "type": "text", "role": "dimension", "description": "Informatica workflow name.", "synonyms": ["wf_name"] },
+            { "name": "start_time", "type": "timestamp", "role": "timestamp", "description": "Workflow start time (UTC).", "format": "ISO8601" },
+            { "name": "time_in_min", "type": "numeric", "role": "measure", "description": "Total duration in minutes.", "default_agg": "max" }
+          ],
+          "sample_predicates": ["start_time >= DATETIME('now','-30 days')"]
+        },
+        {
+          "name": "session_run_statistics_agent",
+          "row_estimate": 8000000,
+          "columns": [
+            { "name": "session_name", "type": "text", "role": "dimension", "description": "Informatica session name.", "synonyms": ["s_name"] },
+            { "name": "workflow_name", "type": "text", "role": "dimension", "description": "Parent workflow name.", "synonyms": ["wf_name"] },
+            { "name": "start_time", "type": "timestamp", "role": "timestamp", "description": "Session start time (UTC).", "format": "ISO8601" },
+            { "name": "time_in_min", "type": "numeric", "role": "measure", "description": "Session duration in minutes.", "default_agg": "avg" }
+          ],
+          "joins": [
+            {
+              "to": "main.workflow_run_statistics_agent",
+              "on": [{ "from_col": "workflow_name", "to_col": "workflow_name" }],
+              "cardinality": "N:1",
+              "desc": "Each session belongs to one workflow."
+            }
+          ],
+          "sample_predicates": ["start_time >= DATETIME('now','-24 hours')"]
+        },
+        {
+          "name": "informatica_related_tables",
+          "row_estimate": 1200000,
+          "columns": [
+            { "name": "workflow_name", "type": "text", "role": "dimension", "description": "Workflow that references a table." },
+            { "name": "session_name", "type": "text", "role": "dimension", "description": "Session that references a table." },
+            { "name": "mapping_name", "type": "text", "role": "dimension", "description": "Mapping that references a table." },
+            { "name": "folder_name", "type": "text", "role": "dimension", "description": "Repository folder." },
+            { "name": "source_name", "type": "text", "role": "dimension", "description": "Referenced source table name." },
+            { "name": "target_name", "type": "text", "role": "dimension", "description": "Referenced target table name." },
+            { "name": "attr_value", "type": "text", "role": "dimension", "description": "Free text attribute value." },
+            { "name": "updated_date", "type": "timestamp", "role": "timestamp", "description": "Last update time.", "format": "ISO8601" }
+          ],
+          "sample_predicates": ["updated_date >= DATETIME('now','-14 days')"]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+# Seed schema (table catalog) into Redis
+seed-catalog:
+	docker compose run --rm catalog-seed
+
+# Seed query templates (query store) into Redis
+seed-queries:
+	docker compose run --rm queries-seed
+
+# Run both seeds in sequence
+seed-all: seed-catalog seed-queries
+
+
+#windods
+
+
+function seed-catalog { docker compose run --rm catalog-seed }
+function seed-queries { docker compose run --rm queries-seed }
+function seed-all { seed-catalog; seed-queries }

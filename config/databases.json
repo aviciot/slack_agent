@@ -1,0 +1,23 @@
+[
+  {
+    "name": "informatica",
+    "type": "sqlite",
+    "db_path": "/app/data/db/informatica_insigts_agent.sqlite"
+  },
+  {
+    "name": "statements",
+    "type": "oracle",
+    "user": "transformer",
+    "password": "transformer99",
+    "dsn": "stgrnd-np-01.dev.bos.credorax.com:1521/stgdev",
+    "pool_max": 4
+  },
+  {
+    "name": "billing",
+    "type": "oracle",
+    "user": "billing",
+    "password": "billing99",
+    "dsn": "stgrnd-np-01.dev.bos.credorax.com:1521/stgdev",
+    "pool_max": 4
+  }
+]

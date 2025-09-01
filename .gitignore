@@ -1,0 +1,41 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache/
+*.coverage
+*.egg-info/
+
+# --- Virtualenvs ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- Editors / OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# --- Project specific ---
+# Local DB artifacts
+data/db/*.sqlite
+data/db/*.sqlite-shm
+data/db/*.sqlite-wal
+app/data/*.sqlite
+app/data/*.sqlite-shm
+app/data/*.sqlite-wal
+
+# Logs / reports
+*.log
+*.csv
+Test/
+V1/
+slack_text2sql_repo_v2/
+tree_output.txt
+
+# Env / secrets
+.env
+*_env
