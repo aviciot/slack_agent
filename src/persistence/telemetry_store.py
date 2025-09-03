@@ -268,3 +268,47 @@ def log_routing_decision(
                 datetime.utcnow(),
             ),
         )
+
+
+def log_error_decision(
+    request_id: str,
+    *,
+    db_name: str,
+    vendor: str,
+    action: str,
+    category: str,
+    reason: str,
+    source: str,
+    signature: str,
+    confidence: float,
+):
+    """
+    Persist one error-handling decision.
+    """
+    with _conn() as cx:
+        # ensure table exists
+        cx.execute(
+            """
+            CREATE TABLE IF NOT EXISTS error_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT,
+                db_name TEXT,
+                vendor TEXT,
+                action TEXT,
+                category TEXT,
+                reason TEXT,
+                source TEXT,
+                signature TEXT,
+                confidence REAL,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        cx.execute(
+            """
+            INSERT INTO error_decisions
+                (request_id, db_name, vendor, action, category, reason, source, signature, confidence, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (request_id, db_name, vendor, action, category, reason, source, signature, confidence, datetime.utcnow()),
+        )

@@ -69,5 +69,24 @@
       "limit":        { "type": "integer", "required": false, "default": 100 }
     },
     "sql_template": "SELECT\n  ps.merchant_id,\n  m.merchant_name,\n  ps.status,\n  COUNT(*) AS statements_count\nFROM public.partner_statements ps\nJOIN public.merchants m USING (merchant_id)\nWHERE ps.period_month = :period_month\n  AND (:merchant_id IS NULL OR ps.merchant_id = :merchant_id)\n  AND (:status IS NULL OR ps.status = :status)\nGROUP BY ps.merchant_id, m.merchant_name, ps.status\nORDER BY statements_count DESC\nFETCH FIRST :limit ROWS ONLY"
-  }
+  },
+  {
+  "qs_id": "QS_statements_count_by_status",
+  "intent": "statements_count_by_status",
+  "title": "Count statements by status in a time window",
+  "db_name": "statements",
+  "dialect": "sqlite",
+  "tables_touched": ["MS_PDF_STATEMENTS"],
+  "nl_paraphrases": [
+    "show me statements count by status in July",
+    "count statements grouped by status for a given month",
+    "how many statements by status this month"
+  ],
+  "params_schema": {
+    "start": { "type": "datetime", "required": false },
+    "end":   { "type": "datetime", "required": false }
+  },
+  "sql_template": "SELECT status, COUNT(*) AS cnt\nFROM MS_PDF_STATEMENTS\nWHERE (:start IS NULL OR created_at >= :start)\n  AND (:end   IS NULL OR created_at <= :end)\nGROUP BY status\nORDER BY cnt DESC;"
+}
+
 ]

@@ -4,7 +4,7 @@ from __future__ import annotations
 import os, re, requests
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter
+from fastapi import APIRouter,Body
 from pydantic import BaseModel
 
 from src.services.catalog_retriever import CatalogRetriever
@@ -133,8 +133,60 @@ def _build_hints_from_catalog(shortlist_objs: List[Any], picked_db: Optional[str
 
 # ---------------- Route ----------------
 
-@router.post("/text2sql", response_model=Text2SQLResp)
-def text2sql(req: Text2SQLReq):
+@router.post(
+    "/text2sql",
+    response_model=Text2SQLResp,
+    summary="Text → SQL routing (Catalog → QueryBank → LLM) with optional execution",
+    description=(
+        "Runs the full text-to-SQL pipeline:\n"
+        "1) CatalogRetriever shortlists candidate databases and picks `picked_db`.\n"
+        "2) QueryBankRuntime tries to match a SQL template from query_bank.json (fast path).\n"
+        "3) If no template accepted (below threshold), falls back to LLM to draft SQL with table hints.\n"
+        "4) If `execute=true`, runs the SQL and returns rows.\n\n"
+        "Use the response `trace` to understand decisions (shortlist, thresholds, bank hit/miss, LLM prompt preview)."
+    )
+)
+def text2sql(
+    req: Text2SQLReq = Body(
+        ...,
+        examples={
+            "BankHit": {
+                "summary": "Bank hit (statements)",
+                "description": "Question matches a bank template; no LLM needed.",
+                "value": {
+                    "question": "show me statements count by status in July",
+                    "execute": False
+                }
+            },
+            "LLMFallback": {
+                "summary": "LLM fallback (informatica workflows)",
+                "description": "No suitable template; falls back to LLM with tables hint.",
+                "value": {
+                    "question": "what workflows were heaviest last week?",
+                    "execute": False
+                }
+            },
+            "ForceDB": {
+                "summary": "Force specific DB",
+                "description": "Override DB routing to run bank/LLM against a chosen DB.",
+                "value": {
+                    "question": "count distinct workflows in the last 48 hours",
+                    "db": "informatica",
+                    "execute": False
+                }
+            },
+            "ManualHints": {
+                "summary": "Provide manual table hints",
+                "description": "Augment auto-hints with your own tables for the LLM path.",
+                "value": {
+                    "question": "top slow workflows in a time window",
+                    "hints": { "tables": ["workflow_run_statistics_agent"] },
+                    "execute": False
+                }
+            }
+        }
+    )
+):
     """
     Production-like text→SQL flow with a clear trace:
       1) Catalog shortlist (auto DB if not provided)

@@ -7,12 +7,14 @@ import json
 import time
 import random
 import os
+import re  # <-- [DECIDER] parse structured errors
 
-from src.services.db_executors import make_registry_from_env
+from src.services.db_executors import make_registry_from_env, SQLiteExecutor, OracleExecutor
 
 # New: 2-stage routing helpers
 from src.services.catalog_retriever import CatalogRetriever
 from src.services.query_bank_runtime import QueryBankRuntime
+from src.services.task_router import TaskRouter
 
 # Types
 from src.app.agent_types import (
@@ -30,6 +32,33 @@ from src.app.agent_types import (
 from src import telemetry as T  # type: ignore
 # Low-level for extended router details
 from src.persistence.telemetry_store import log_routing_decision, log_qcache_event
+
+# [DECIDER] bring the error handler to the agent boundary as a fallback
+from src.services.error_decider.handler import ErrorHandlingService
+_ERROR_SVC_FOR_AGENT = ErrorHandlingService()
+
+# [DECIDER] Regex to extract decisions from executor message:
+# [ERROR_DECIDER] db=<...> vendor=<...> action=... category=... reason=... source=... signature=...
+_DECIDER_MSG_RE = re.compile(
+    r"\[ERROR_DECIDER\].*?\baction=(?P<action>\w+)\s+category=(?P<category>\w+)\s+reason=(?P<reason>.*?)\s+source=(?P<source>\w+)\s+signature=(?P<sig>\S+)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_decision_from_exception(exc: Exception) -> Optional[Dict[str, Any]]:
+    """Prefer decisions already made by executors (bank/force_quit/regex/llm)."""
+    m = _DECIDER_MSG_RE.search(str(exc) or "")
+    if not m:
+        return None
+    g = m.groupdict()
+    return {
+        "action": g["action"].upper(),
+        "category": g["category"].lower(),
+        "reason": g["reason"].strip(),
+        "confidence": 0.9,          # executor already made a deterministic choice
+        "source": g["source"],
+        "error_signature": g["sig"],
+    }
 
 
 class Agent:
@@ -54,10 +83,38 @@ class Agent:
         self.executors = executors or make_registry_from_env(validator=validator)
         # New: catalog retriever for Stage-1
         self.catalog = CatalogRetriever()
+        self._task_router = TaskRouter()
+        # [DECIDER] store last decision for optional surfacing
+        self._last_decision: Optional[Dict[str, Any]] = None
 
     # --------------------------- Main entry ---------------------------
 
     def run(self, request_id: str, user_text: str, slack_ctx: SlackContext) -> AgentReply:
+        if os.getenv("TASK_ROUTER_ENABLED", "true").lower() in ("1", "true", "yes"):
+            decision = self._task_router.route(user_text)
+            # Telemetry (use your existing telemetry log function)
+            try:
+                from src.persistence.telemetry_store import log_routing_decision
+                log_routing_decision(
+                    request_id=request_id,
+                    source="task",
+                    picked=decision.task_type,
+                    score=decision.confidence,
+                    candidates=[{"id": c.id, "score": c.score} for c in decision.candidates],
+                    fallback_used=(decision.source == "llm"),
+                )
+            except Exception:
+                pass
+
+            if decision.task_type != "sql_query":
+                # Phase 0: we only detect; real executors arrive in Phase 3
+                return {
+                    "ok": True,
+                    "task_type": decision.task_type,
+                    "message": f"Detected task '{decision.task_type}' (Phase 3 will implement execution).",
+                    "confidence": decision.confidence,
+                }
+
         plan_steps = 0
         total_retries = 0
 
@@ -76,7 +133,7 @@ class Agent:
             T.http_request(
                 request_id=request_id,
                 source="slack",
-                path="/slack/sql",
+                path="/slack/ask",
                 text=user_text,
                 user_id=slack_ctx.user,
                 channel_id=slack_ctx.channel,
@@ -171,39 +228,46 @@ class Agent:
                     else:
                         try:
                             start = time.time()
-                            rows = executor.execute(bank_res["sql"], row_cap=int(getattr(self.settings, "ROW_LIMIT", 200)))
-                            duration_ms = int((time.time() - start) * 1000)
-                            shaped = self._tuples_to_lists(rows)
-                            s_bank.status = "ok"
-                            s_bank.detail.update({"rows": len(shaped), "exec_key": exec_key})
-                            # Emit SQL run telemetry (no text difference tracking here)
-                            try:
-                                T.sql_run(
-                                    request_id=request_id,
-                                    sql_before=bank_res["sql"],
-                                    sql_after=bank_res["sql"],
-                                    safety_flags=[],
-                                    executed=1,
-                                    duration_ms=duration_ms,
-                                    rowcount=len(shaped),
-                                    error=None,
-                                )
-                            except Exception:
-                                pass
+                            # [DECIDER] run once via executor; parse/compute decision on failure
+                            ok, rows_or_none, decision = self._exec_once_with_decider(executor, chosen_db, bank_res["sql"], row_cap=int(getattr(self.settings, "ROW_LIMIT", 200)), request_id=request_id)
+                            if not ok:
+                                s_bank.status = "error"
+                                s_bank.detail.update({"exec_key": exec_key, "decision": decision})
+                                # fall through to LLM path (keep previous behavior)
+                            else:
+                                rows = rows_or_none or []
+                                duration_ms = int((time.time() - start) * 1000)
+                                shaped = self._tuples_to_lists(rows)
+                                s_bank.status = "ok"
+                                s_bank.detail.update({"rows": len(shaped), "exec_key": exec_key})
+                                # Emit SQL run telemetry (no text difference tracking here)
+                                try:
+                                    T.sql_run(
+                                        request_id=request_id,
+                                        sql_before=bank_res["sql"],
+                                        sql_after=bank_res["sql"],
+                                        safety_flags=[],
+                                        executed=1,
+                                        duration_ms=duration_ms,
+                                        rowcount=len(shaped),
+                                        error=None,
+                                    )
+                                except Exception:
+                                    pass
 
-                            reply_text = self._format_rows_for_slack(
-                                columns=[],  # unknown; renderer will synthesize headers if empty
-                                rows=shaped,
-                                source=f"bank/{exec_key}",
-                                tables=[chosen_db],
-                            )
-                            route = RouteDecision(source="bank", candidates=[chosen_db], selected=[chosen_db])
-                            meta = AgentMeta(request_id=request_id, route=route, retries=0, plan_steps=plan_steps, plan=plan)
-                            try:
-                                T.http_request(request_id=request_id, source="slack", path="/slack/sql", text=user_text, status="ok")
-                            except Exception:
-                                pass
-                            return AgentReply(status=AgentStatus.OK, reply=reply_text, meta=meta)
+                                reply_text = self._format_rows_for_slack(
+                                    columns=[],  # unknown; renderer will synthesize headers if empty
+                                    rows=shaped,
+                                    source=f"bank/{exec_key}",
+                                    tables=[chosen_db],
+                                )
+                                route = RouteDecision(source="bank", candidates=[chosen_db], selected=[chosen_db])
+                                meta = AgentMeta(request_id=request_id, route=route, retries=0, plan_steps=plan_steps, plan=plan)
+                                try:
+                                    T.http_request(request_id=request_id, source="slack", path="/slack/ask", text=user_text, status="ok")
+                                except Exception:
+                                    pass
+                                return AgentReply(status=AgentStatus.OK, reply=reply_text, meta=meta)
                         except Exception as e:
                             # fall through to LLM path
                             s_bank.status = "error"
@@ -231,7 +295,7 @@ class Agent:
                     except Exception:
                         pass
                     try:
-                        T.http_request(request_id=request_id, source="slack", path="/slack/sql", text=user_text, status="ok")
+                        T.http_request(request_id=request_id, source="slack", path="/slack/ask", text=user_text, status="ok")
                     except Exception:
                         pass
                     return AgentReply(status=AgentStatus.OK, reply=reply_text, meta=meta)
@@ -245,7 +309,11 @@ class Agent:
             # Build DB-aware route: executor key + tables for that DB
             exec_key = self._executor_key_for_db(chosen_db)
             tables_for_db = self._tables_for_db(chosen_db, user_text)
-            route = RouteDecision(source=exec_key, candidates=tables_for_db, selected=tables_for_db[: int(os.getenv("AGENT_LLMSCHEMA_MAX_TABLES", "25"))])
+            route = RouteDecision(
+                source=exec_key,
+                candidates=tables_for_db,
+                selected=tables_for_db[: int(os.getenv("AGENT_LLMSCHEMA_MAX_TABLES", "25"))],
+            )
 
         s_route = _step("route_decision", strategy="catalog_then_bank_then_llm")
         s_route.status = "ok"
@@ -293,11 +361,11 @@ class Agent:
         s_val.detail.update({"verdict": verdict.verdict, "reasons": verdict.reasons})
 
         # 5) EXECUTE
-        run_res = self._execute_with_retry(sql_text, route)
+        run_res = self._execute_with_retry(sql_text, route,request_id=request_id)
         total_retries += run_res.retry_count
         s_exec = _step("execute")
         s_exec.status = run_res.status
-        s_exec.detail.update({"rowcount": len(run_res.rows or [])})
+        s_exec.detail.update({"rowcount": len(run_res.rows or []), "decision": self._last_decision})
 
         if run_res.status == "success":
             # ✅ Cache template back into bank with db_name
@@ -314,7 +382,7 @@ class Agent:
             )
             meta = AgentMeta(request_id=request_id, route=route, retries=total_retries, plan_steps=plan_steps, plan=plan)
             try:
-                T.http_request(request_id=request_id, source="slack", path="/slack/sql", text=user_text, status="ok")
+                T.http_request(request_id=request_id, source="slack", path="/slack/ask", text=user_text, status="ok")
             except Exception:
                 pass
             return AgentReply(status=AgentStatus.OK, reply=reply_text, meta=meta)
@@ -324,7 +392,11 @@ class Agent:
             alt_db = shortlist[1]["db"]
             alt_exec = self._executor_key_for_db(alt_db)
             alt_tables = self._tables_for_db(alt_db, user_text)
-            alt_route = RouteDecision(source=alt_exec, candidates=alt_tables, selected=alt_tables[: int(os.getenv("AGENT_LLMSCHEMA_MAX_TABLES", "25"))])
+            alt_route = RouteDecision(
+                source=alt_exec,
+                candidates=alt_tables,
+                selected=alt_tables[: int(os.getenv("AGENT_LLMSCHEMA_MAX_TABLES", "25"))],
+            )
 
             s_reroute = _step("reroute_after_error", to_db=alt_db)
             # Draft/validate/exec on alt DB
@@ -332,10 +404,10 @@ class Agent:
             alt_verdict = self._validate(alt_sql)
             if alt_verdict.fixed_sql:
                 alt_sql = alt_verdict.fixed_sql
-            alt_run = self._execute_with_retry(alt_sql, alt_route)
+            alt_run = self._execute_with_retry(alt_sql, alt_route,request_id=request_id)
             total_retries += alt_run.retry_count
             s_reroute.status = alt_run.status
-            s_reroute.detail.update({"rowcount": len(alt_run.rows or [])})
+            s_reroute.detail.update({"rowcount": len(alt_run.rows or []), "decision": self._last_decision})
 
             if alt_run.status == "success":
                 # ✅ Cache template for alt DB
@@ -370,17 +442,17 @@ class Agent:
 
         # 6) REPHRASE (legacy)
         if verdict.verdict in ("retryable",) or run_res.status == "error":
-            re_sql, re_meta = self._rephrase(sql_text, verdict)
+            re_sql, re_meta = self._rephrase(sql_text, verdict, route.source)
             s_rephrase = _step("rephrase")
             s_rephrase.status = "ok"
             re_verdict = self._validate(re_sql)
             if re_verdict.fixed_sql:
                 re_sql = re_verdict.fixed_sql
-            re_run = self._execute_with_retry(re_sql, route)
+            re_run = self._execute_with_retry(re_sql, route ,request_id=request_id)
             total_retries += re_run.retry_count
             s_exec2 = _step("execute_after_rephrase")
             s_exec2.status = re_run.status
-            s_exec2.detail.update({"rowcount": len(re_run.rows or [])})
+            s_exec2.detail.update({"rowcount": len(re_run.rows or []), "decision": self._last_decision})
 
             if re_run.status == "success":
                 try:
@@ -406,11 +478,11 @@ class Agent:
             alt_verdict = self._validate(alt_sql)
             if alt_verdict.fixed_sql:
                 alt_sql = alt_verdict.fixed_sql
-            alt_run = self._execute_with_retry(alt_sql, alt_route)
+            alt_run = self._execute_with_retry(alt_sql, alt_route,request_id=request_id)
             total_retries += alt_run.retry_count
             s_exec_alt = _step("execute_alt")
             s_exec_alt.status = alt_run.status
-            s_exec_alt.detail.update({"rowcount": len(alt_run.rows or [])})
+            s_exec_alt.detail.update({"rowcount": len(alt_run.rows or [])}, )
 
             if alt_run.status == "success":
                 try:
@@ -434,15 +506,32 @@ class Agent:
 
     # --------------------------- Internals ---------------------------
 
+    def _dialect_for_exec(self, exec_key: str) -> str:
+        """
+        Map an executor key (db name) to SQL dialect rules for the LLM.
+        - SQLiteExecutor → "sqlite_strict"
+        - OracleExecutor  → "oracle_strict"
+        """
+        executor = self.executors.get(exec_key)
+        if isinstance(executor, SQLiteExecutor):
+            return "sqlite_strict"
+        if isinstance(executor, OracleExecutor):
+            return "oracle_strict"
+        # fallback (safe default)
+        return "oracle_strict"
+
     def _executor_key_for_db(self, db_name: Optional[str]) -> str:
-        db = (db_name or "").lower()
-        if db in {"informatica", "sqlite", "local"}:
-            return "sqlite"
-        # default other backends to Oracle unless configured otherwise
-        return "oracle"
+        """
+        Return the exact key used in executors registry.
+        With databases.json, each DB (informatica, statements, billing) is registered under its own name.
+        """
+        return (db_name or "").lower()
 
     def _db_guess_from_exec(self, exec_key: str) -> str:
-        return "informatica" if exec_key == "sqlite" else "statements"
+        """
+        Inverse of _executor_key_for_db. Here it's just identity.
+        """
+        return (exec_key or "").lower()
 
     def _tables_for_db(self, db_name: Optional[str], question: str) -> List[str]:
         """
@@ -513,7 +602,7 @@ class Agent:
             tables = catalog_keys[:max_tables]
 
         schema_context = {t: self.validator.catalog.get(t, []) for t in tables} if tables else None
-        rules = "sqlite_strict" if route.source == "sqlite" else "oracle_strict"
+        rules = self._dialect_for_exec(route.source)
         try:
             out = self.llm.draft_sql(user_text=user_text, tables=tables, rules=rules, schema_context=schema_context)
         except TypeError:
@@ -530,10 +619,11 @@ class Agent:
             "latency_ms": out.get("latency_ms") if isinstance(out, dict) else None,
         }
 
-    def _rephrase(self, sql_text: str, verdict: ValidatorVerdict) -> Tuple[str, Dict[str, Any]]:
+    def _rephrase(self, sql_text: str, verdict: ValidatorVerdict, exec_key: str) -> Tuple[str, Dict[str, Any]]:
         if self.llm is None or not hasattr(self.llm, "rephrase_sql"):
             raise NotImplementedError("No LLM client injected")
-        rules = "sqlite_strict" if verdict and "oracle" not in (verdict.reasons or []) else "oracle_strict"
+
+        rules = self._dialect_for_exec(exec_key)
         out = self.llm.rephrase_sql(sql_text=sql_text, reasons=verdict.reasons, rules=rules)
         sql = out.get("sql") if isinstance(out, dict) else getattr(out, "sql", None)
         if not sql:
@@ -554,7 +644,46 @@ class Agent:
         row_limit_applied = (fixed_sql != sql_text)
         return ValidatorVerdict(verdict=verdict, reasons=reasons, fixed_sql=fixed_sql, row_limit_applied=row_limit_applied)
 
-    def _execute_with_retry(self, sql_text: str, route: RouteDecision) -> SQLRunResult:
+    # ---------------- DECIDER-AWARE EXECUTION ----------------
+    def _exec_once_with_decider(
+        self,
+        executor,
+        db_name: str,
+        sql_text: str,
+        *,
+        row_cap: int,
+        request_id: str,
+    ) -> Tuple[bool, Optional[List[Tuple]], Optional[Dict[str, Any]]]:
+        """
+        Run one attempt through the executor. On error, try to parse a decision from the
+        raised message; if absent, compute a decision here via ErrorHandlingService.
+        Returns (ok, rows|None, decision|None)
+        """
+        try:
+            rows = executor.execute(sql_text, row_cap=row_cap, request_id=request_id)
+            return True, rows, None
+        except Exception as e:
+            # Prefer decisions already made by the executor
+            decision = _extract_decision_from_exception(e)
+            if decision is None:
+                # Compute a decision here so callers can branch
+                decision = _ERROR_SVC_FOR_AGENT.handle(
+                    db_vendor=getattr(executor, "name", "unknown"),
+                    db_name=db_name,
+                    sql=sql_text,
+                    error=e,
+                    retry_count=0,
+                    exec_phase="agent",
+                )["decision"]
+            self._last_decision = decision
+            return False, None, decision
+
+
+    def _execute_with_retry(self, sql_text: str, route: RouteDecision, *, request_id: str) -> SQLRunResult:
+        """
+        Retry policy (agent level) now respects the error-decider.
+        Only retries when the decision says action == 'RETRY'.
+        """
         max_retries = int(getattr(self.settings, "RETRY_MAX", 3))
         base_ms = int(getattr(self.settings, "RETRY_BASE_MS", 150))
         jitter_ms = int(getattr(self.settings, "RETRY_JITTER_MS", 200))
@@ -571,14 +700,19 @@ class Agent:
             )
 
         attempt = 0
-        last_err: Optional[str] = None
         started = time.time()
 
-        while attempt <= max_retries:
-            try:
-                rows = executor.execute(sql_text, row_cap=row_cap)
+        while True:
+            ok, rows, decision = self._exec_once_with_decider(
+                executor,
+                route.source,
+                sql_text,
+                row_cap=row_cap,
+                request_id=request_id,  
+            )
+            if ok:
                 duration_ms = int((time.time() - started) * 1000)
-                shaped = self._tuples_to_lists(rows)
+                shaped = self._tuples_to_lists(rows or [])
                 return SQLRunResult(
                     status="success",
                     rows=shaped,
@@ -586,29 +720,26 @@ class Agent:
                     duration_ms=duration_ms,
                     retry_count=attempt,
                 )
-            except Exception as e:
-                last_err = type(e).__name__
-                if attempt == max_retries:
-                    duration_ms = int((time.time() - started) * 1000)
-                    return SQLRunResult(
-                        status="error",
-                        rows=None,
-                        error_class=last_err,
-                        duration_ms=duration_ms,
-                        retry_count=attempt,
-                    )
-                sleep_ms = base_ms * (2 ** attempt) + random.randint(0, jitter_ms)
-                time.sleep(sleep_ms / 1000.0)
-                attempt += 1
 
-        duration_ms = int((time.time() - started) * 1000)
-        return SQLRunResult(
-            status="error",
-            rows=None,
-            error_class=last_err or "UnknownError",
-            duration_ms=duration_ms,
-            retry_count=max_retries,
-        )
+            # No success → look at decision
+            action = (decision or {}).get("action", "REPHRASE")
+            retry_allowed = (action == "RETRY") and (attempt < max_retries)
+
+            if not retry_allowed:
+                duration_ms = int((time.time() - started) * 1000)
+                return SQLRunResult(
+                    status="error",
+                    rows=None,
+                    error_class=action,  # minimal surfacing; full decision is stored in self._last_decision
+                    duration_ms=duration_ms,
+                    retry_count=attempt,
+                )
+
+            # Backoff + try again
+            sleep_ms = base_ms * (2 ** attempt) + random.randint(0, jitter_ms)
+            time.sleep(sleep_ms / 1000.0)
+            attempt += 1
+
 
     # ---------------- Utility ----------------
 
@@ -636,7 +767,7 @@ class Agent:
             header = " | ".join(columns)
         else:
             header = " | ".join([f"c{i}" for i in range(len(rows[0]) or 0)])
-        sep = "-+-".join(["-" * max(3, len(h)) for h in header.split(" | ")])
+        sep = "-+-".join(["-""*" * 0 + "-" * max(3, len(h)) for h in header.split(" | ")])  # keep formatting robust
         lines = [header, sep]
         max_lines = 25
         for r in rows[:max_lines]:

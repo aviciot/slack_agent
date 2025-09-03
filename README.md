@@ -135,7 +135,7 @@ docker compose exec redis redis-cli -a devpass FLUSHALL
 docker compose exec redis redis-cli -a devpass FT.DROPINDEX idx:qcache DD
 
 docker compose exec api sh -lc "env | grep -E 'CATALOG|TABLE|JSON|DB_PATH'"
-
+docker compose build --no-cache api
 
 docker compose run --rm --build kb-seed
 

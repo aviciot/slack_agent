@@ -23,6 +23,8 @@ from src.app.routes_agent import router as agent_router
 from src.app.routes_agent_debug import router as agent_debug_router
 from src.app.text2sql_debug import router as text2sql_router
 from src.app.store_inspect import router as store_inspect_router
+from src.app.routes_task_debug import router as task_debug_router
+from src.app.routes_errorbank import router as errorbank_router
 
 
 # Request context / logging
@@ -252,10 +254,12 @@ async def reqid_and_telemetry_middleware(request: Request, call_next):
 
 # ---- Routers ----
 app.include_router(admin_router, prefix="/admin", tags=["admin"])
-app.include_router(agent_router, tags=["slack"])
-app.include_router(agent_debug_router, tags=["debug"])
-app.include_router(text2sql_router, tags=["debug"])
+app.include_router(agent_router)
+app.include_router(agent_debug_router)
+app.include_router(text2sql_router)
 app.include_router(store_inspect_router)
+app.include_router(task_debug_router)
+app.include_router(errorbank_router)
 
 # ---- Health ----
 def db_ok() -> bool:

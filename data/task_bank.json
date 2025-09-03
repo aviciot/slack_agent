@@ -1,0 +1,69 @@
+[
+  {
+    "id": "sql_query",
+    "description": "Answer a data question by generating and executing SQL against the correct database.",
+    "examples": [
+      "show me statements count by status in July",
+      "heaviest workflows in the last 7 days",
+      "total transactions per channel yesterday",
+      "in what workflow is table X used as source",
+        "which sessions failed for workflow Y in past week",
+        "list all tables used by workflow Z",
+        "show distinct workflows ran in last 48 hours"
+    ],
+    "synonyms": ["query", "sql", "database", "report", "metrics"],
+    "required_params": ["question_text"],
+    "followups": ["explain_sql", "generate_chart", "send_email"]
+  },
+  {
+    "id": "file_compare",
+    "description": "Compare two structured files (CSV, Excel, JSON) and highlight differences.",
+    "examples": [      
+      "diff file A and file B by order_id",
+      "show changes between two reports",
+      "comapre these two datasets for differences",
+      "do full comparison of file A and file B",
+      "generate a delta report between these two files"
+      
+    ],
+    "synonyms": ["compare", "diff", "reconcile", "delta"],
+    "required_params": ["file_a", "file_b"],
+    "followups": ["generate_report", "send_email", "open_jira"]
+  },
+  {
+    "id": "send_email",
+    "description": "Send a report, chart, or query result via email to specified recipients.",
+    "examples": [
+      "email me the results",
+      "send this report to finance team",
+      "mail the output as attachment"
+    ],
+    "synonyms": ["email", "mail", "send"],
+    "required_params": ["to_address", "content"],
+    "followups": []
+  },
+  {
+    "id": "open_jira",
+    "description": "Create a new Jira issue to track problems found in reports or comparisons.",
+    "examples": [
+      "open a jira bug for mismatched data",
+      "create issue if differences found",
+      "log this as task in jira"
+    ],
+    "synonyms": ["jira", "ticket", "issue", "bug"],
+    "required_params": ["title", "description"],
+    "followups": ["send_email"]
+  },
+  {
+    "id": "generate_chart",
+    "description": "Create a simple chart (line, bar) from query results or comparison data.",
+    "examples": [
+      "plot workflow runtimes over the last week",
+      "show me a graph of daily totals",
+      "visualize this data"
+    ],
+    "synonyms": ["chart", "graph", "plot", "visualize"],
+    "required_params": ["dataset"],
+    "followups": ["send_email"]
+  }
+]

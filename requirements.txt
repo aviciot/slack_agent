@@ -16,3 +16,6 @@ dateparser
 oracledb
 psycopg2-binary
 PyMySQL
+python-multipart
+PyYAML
+requests

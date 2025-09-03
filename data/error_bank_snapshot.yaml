@@ -1,0 +1,176 @@
+ora:00054:
+  action: RETRY
+  category: transient
+  confidence: 1.0
+  created_at: '2025-09-03T08:22:22Z'
+  error_signature: ora:00054
+  hits: 0
+  last_seen: '2025-09-03T08:22:22Z'
+  prompt_version: v0-seed
+  reason: Resource busy; retry
+  source: seed
+ora:00904:
+  action: REPHRASE
+  category: schema
+  confidence: 1.0
+  created_at: '2025-09-03T08:22:22Z'
+  error_signature: ora:00904
+  hits: 0
+  last_seen: '2025-09-03T08:22:22Z'
+  prompt_version: v0-seed
+  reason: Invalid identifier
+  source: seed
+ora:00942:
+  action: REPHRASE
+  category: schema
+  confidence: 1.0
+  created_at: '2025-09-03T08:22:22Z'
+  error_signature: ora:00942
+  hits: 2
+  last_seen: '2025-09-03T08:30:01Z'
+  prompt_version: v0-seed
+  reason: Table or view does not exist
+  source: bank
+ora:01017:
+  action: QUIT
+  category: auth
+  confidence: 1.0
+  created_at: '2025-09-03T08:22:22Z'
+  error_signature: ora:01017
+  hits: 2
+  last_seen: '2025-09-03T08:30:01Z'
+  prompt_version: v0-seed
+  reason: Invalid credentials
+  source: bank
+ora:01555:
+  action: RETRY
+  category: transient
+  confidence: 1.0
+  created_at: '2025-09-03T08:22:22Z'
+  error_signature: ora:01555
+  hits: 0
+  last_seen: '2025-09-03T08:22:22Z'
+  prompt_version: v0-seed
+  reason: Snapshot too old; try again
+  source: seed
+ora:12154:
+  action: QUIT
+  category: connectivity
+  confidence: 1.0
+  created_at: '2025-09-03T08:22:22Z'
+  error_signature: ora:12154
+  hits: 0
+  last_seen: '2025-09-03T08:22:22Z'
+  prompt_version: v0-seed
+  reason: TNS/DSN issue
+  source: seed
+ora:22222:
+  action: REPHRASE
+  category: schema
+  confidence: 0.7
+  created_at: '2025-09-03T08:22:49Z'
+  error_signature: ora:22222
+  hits: 2
+  last_seen: '2025-09-03T08:30:04Z'
+  prompt_version: v1
+  reason: LLM decision
+  source: bank
+regex:any:
+- action: QUIT
+  category: auth
+  pattern: (?i)permission denied
+  reason: Permission denied
+- action: RETRY
+  category: connectivity
+  pattern: (?i)(could not connect|connection refused|timed out)
+  reason: Connectivity failure (transient)
+regex:mssql:
+- action: QUIT
+  category: auth
+  pattern: (?is)Login failed for user
+  reason: Invalid credentials or privileges
+regex:mysql:
+- action: QUIT
+  category: auth
+  pattern: (?is)Access denied for user
+  reason: Invalid credentials or privileges
+- action: REPHRASE
+  category: schema
+  pattern: (?is)You have an error in your SQL syntax
+  reason: Syntax error; rephrase/fix SQL
+regex:ora:
+- action: ASK_USER
+  category: data
+  pattern: (?i)unique constraint .* violated
+  reason: Duplicate key
+- action: RETRY
+  category: connectivity
+  pattern: (?i)(lost contact|end-of-file on communication channel)
+  reason: Connection dropped (likely transient)
+regex:pg:
+- action: REPHRASE
+  category: encoding
+  pattern: (?is)invalid byte sequence for encoding UTF-?8
+  reason: Bad input encoding (UTF-8)
+regex:snowflake:
+- action: REPHRASE
+  category: data
+  pattern: (?is)Numeric value .* is not recognized
+  reason: Bad numeric cast/parse
+regex:sqlite:
+- action: QUIT
+  category: schema
+  pattern: (?i)\bno such table\b(?::\s*(?P<table>[A-Za-z0-9_]+))?
+  reason: Missing table
+- action: ASK_USER
+  category: data
+  pattern: (?i)constraint failed
+  reason: Constraint violation (duplicate/null)
+seed:version:
+  codes_count: 8
+  file_hash: f924f10cd913086648e0a2c40ef2a110bb7215ba
+  regex_rules_count: 11
+  ts: '2025-09-03T08:22:22Z'
+  vendors:
+  - any
+  - mssql
+  - mysql
+  - ora
+  - pg
+  - snowflake
+  - sqlite
+  version: v1
+  yaml_path: /app/config/error_bank/error_handling.yaml
+sqlite:database_is_locked:
+  action: RETRY
+  category: transient
+  confidence: 1.0
+  created_at: '2025-09-03T08:22:22Z'
+  error_signature: sqlite:database_is_locked
+  hits: 0
+  last_seen: '2025-09-03T08:22:22Z'
+  prompt_version: v0-seed
+  reason: Database is locked; retry with backoff
+  source: seed
+sqlite:msg:5a5ef0524575:
+  action: REPHRASE
+  category: schema
+  confidence: 0.7
+  created_at: '2025-09-03T08:30:04Z'
+  error_signature: sqlite:msg:5a5ef0524575
+  hits: 1
+  last_seen: '2025-09-03T08:30:04Z'
+  prompt_version: v1
+  reason: LLM decision
+  source: llm-cloudflare
+sqlite:no_such_table:
+  action: QUIT
+  category: schema
+  confidence: 1.0
+  created_at: '2025-09-03T08:22:22Z'
+  error_signature: sqlite:no_such_table
+  hits: 0
+  last_seen: '2025-09-03T08:22:22Z'
+  prompt_version: v0-seed
+  reason: No such table
+  source: seed

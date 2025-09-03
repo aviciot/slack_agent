@@ -1,0 +1,86 @@
+error_handling:
+  vendors:
+
+    oracle:
+      # Exact codes (seeded into Redis)
+      error_codes:
+        ORA-01017: { action: QUIT,     category: auth,     reason: "Invalid credentials" }
+        ORA-12154: { action: QUIT,     category: network,  reason: "TNS/DSN issue" }
+        ORA-00942: { action: REPHRASE, category: schema,   reason: "Table or view does not exist" }
+        ORA-00904: { action: REPHRASE, category: schema,   reason: "Invalid identifier" }
+        ORA-00054: { action: RETRY,    category: transient,reason: "Resource busy; retry" }
+        ORA-01555: { action: RETRY,    category: transient,reason: "Snapshot too old; try again" }
+
+      regex_rules:
+        - pattern: "(?i)unique constraint .* violated"
+          action: ASK_USER
+          category: data
+          reason: "Duplicate key"
+        - pattern: "(?i)(lost contact|end-of-file on communication channel)"
+          action: RETRY
+          category: network
+          reason: "Connection dropped (likely transient)"
+        # Force LLM for unknown ORA-xxxxx (handled in code; included here as a hint)
+        # - pattern: "(?i)\\bORA-\\d{5}\\b"
+        #   action: LLM
+        #   category: schema
+        #   reason: "Unknown ORA code; ask LLM"
+
+    sqlite:
+      error_codes:
+        database_is_locked: { action: RETRY, category: transient, reason: "Database is locked; retry with backoff" }
+        no_such_table:      { action: QUIT,  category: schema,    reason: "No such table" } # changed to QUIT
+
+      regex_rules:
+        - pattern: "(?i)\\bno such table\\b(?::\\s*(?P<table>[A-Za-z0-9_]+))?"
+          action: QUIT
+          category: schema
+          reason: "Missing table"
+        - pattern: "(?i)constraint failed"
+          action: ASK_USER
+          category: data
+          reason: "Constraint violation (duplicate/null)"
+
+    mysql:
+      regex_rules:
+        - pattern: "(?is)Access denied for user"
+          action: QUIT
+          category: auth
+          reason: "Invalid credentials or privileges"
+        - pattern: "(?is)You have an error in your SQL syntax"
+          action: REPHRASE
+          category: schema
+          reason: "Syntax error; rephrase/fix SQL"
+
+    mssql:
+      regex_rules:
+        - pattern: "(?is)Login failed for user"
+          action: QUIT
+          category: auth
+          reason: "Invalid credentials or privileges"
+
+    postgres:
+      regex_rules:
+        - pattern: "(?is)invalid byte sequence for encoding UTF-?8"
+          action: REPHRASE
+          category: encoding
+          reason: "Bad input encoding (UTF-8)"
+        # Keep your existing permission-denied handling if any
+
+    snowflake:
+      regex_rules:
+        - pattern: "(?is)Numeric value .* is not recognized"
+          action: REPHRASE
+          category: data
+          reason: "Bad numeric cast/parse"
+
+    any:
+      regex_rules:
+        - pattern: "(?i)permission denied"
+          action: QUIT
+          category: auth
+          reason: "Permission denied"
+        - pattern: "(?i)(could not connect|connection refused|timed out)"
+          action: RETRY
+          category: network
+          reason: "Connectivity failure (transient)"
