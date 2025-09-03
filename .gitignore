@@ -53,6 +53,7 @@ htmlcov/
 .mypy_cache/
 
 
+*.sqlite
 *.sqlite-shm
 *.sqlite-wal
 *.sqlite-journal
