@@ -1,139 +1,233 @@
-#!/usr/bin/env python3
+# src/services/error_decider/llm_adapter.py
 from __future__ import annotations
 
-import os, json, re
+import os
+import json
+import time
+import hashlib
 from typing import Any, Dict, Optional
+
+import requests
+
+
+def _normalize_action(s: str) -> str:
+    s = (s or "").strip().upper()
+    if s not in {"QUIT", "RETRY", "REPHRASE", "ASK_USER"}:
+        return "REPHRASE"
+    return s
+
+
+def _normalize_category(s: str) -> str:
+    s = (s or "").strip().lower()
+    # light aliasing
+    aliases = {
+        "authentication": "auth",
+        "authorization": "auth",
+        "network": "connectivity",
+        "schema_error": "schema",
+        "syntax": "schema",
+    }
+    s = aliases.get(s, s)
+    return s or "schema"
+
+
+def _safe_str(obj: Any, max_len: int = 240) -> str:
+    s = str(obj or "")
+    if len(s) > max_len:
+        return s[: max_len - 3] + "..."
+    return s
+
 
 class LLMAdapter:
     """
-    decide(vendor, db_name, sql_redacted, error_text) -> {action, category, reason, confidence, source}
+    Calls Cloudflare Workers AI (or other providers later) to classify DB errors into:
+      action:     QUIT | RETRY | REPHRASE | ASK_USER
+      category:   auth | connectivity | schema | data | encoding | transient | other
+      reason:     short human explanation
+      confidence: float 0..1
 
-    Providers:
-      - stub        : offline heuristic (default if no provider creds)
-      - cloudflare  : uses Cloudflare Workers AI
-      - openai      : uses OpenAI Chat Completions
-
-    Env:
-      ERROR_DECIDER_PROVIDER = stub | cloudflare | openai
-      ERROR_DECIDER_MODEL    = <model slug> (e.g., gpt-4.1-mini, @cf/llama-3.1-8b-instruct)
-      ERROR_DECIDER_TIMEOUT_S= 8
-      CF_API_TOKEN           = <token>
-      CF_ACCOUNT_ID          = <id>
-      OPENAI_API_KEY         = <key>
+    Return payload always includes: source="llm-cloudflare".
     """
-    def __init__(self,
-                 provider: Optional[str] = None,
-                 model: Optional[str] = None,
-                 timeout_s: Optional[int] = None):
-        self.provider = (provider or os.getenv("ERROR_DECIDER_PROVIDER", "stub")).strip().lower()
-        self.model = model or os.getenv("ERROR_DECIDER_MODEL", "gpt-4.1-mini")
-        self.timeout_s = int(timeout_s if timeout_s is not None else os.getenv("ERROR_DECIDER_TIMEOUT_S", "8"))
 
-        self._cf_token = os.getenv("CF_API_TOKEN")
-        self._cf_account = os.getenv("CF_ACCOUNT_ID")
-        self._openai_key = os.getenv("OPENAI_API_KEY")
+    def __init__(self, *, provider: Optional[str], model: Optional[str]) -> None:
+        self.provider = (provider or os.getenv("ERROR_DECIDER_PROVIDER") or "cloudflare").lower()
+        self.model = model or os.getenv("ERROR_DECIDER_MODEL", "@cf/meta/llama-3-8b-instruct")
 
-        # auto-downgrade to stub if creds missing
-        if self.provider == "cloudflare" and not (self._cf_token and self._cf_account):
-            self.provider = "stub"
-        if self.provider == "openai" and not self._openai_key:
-            self.provider = "stub"
+        # Tunables (deterministic by default)
+        self.temperature = float(os.getenv("ERROR_DECIDER_TEMP", "0"))
+        self.max_tokens = int(os.getenv("ERROR_DECIDER_MAXTOKENS", "128"))
+        self.timeout_sec = int(os.getenv("ERROR_DECIDER_TIMEOUT_SEC", "15"))
 
-    # ---------------- Heuristic stub ----------------
-    def _stub_decide(self, vendor: str, db_name: str, sql_redacted: str, error_text: str) -> Dict[str, Any]:
-        et = (error_text or "").lower()
-        if "ora-01017" in et or "invalid password" in et or "authentication" in et or "permission denied" in et:
-            return {"action": "QUIT", "category": "auth", "reason": "Heuristic auth", "confidence": 0.75, "source": "llm-stub"}
-        if any(x in et for x in ["could not connect", "listener", "tns", "refused", "timed out", "dns"]):
-            return {"action": "QUIT", "category": "connectivity", "reason": "Heuristic connectivity", "confidence": 0.7, "source": "llm-stub"}
-        if any(x in et for x in ["database is locked", "deadlock", "busy", "snapshot too old", "serialization"]):
-            return {"action": "RETRY", "category": "transient", "reason": "Heuristic transient", "confidence": 0.65, "source": "llm-stub"}
-        if any(x in et for x in ["no such table", "does not exist", "invalid identifier", "syntax error"]):
-            return {"action": "REPHRASE", "category": "schema", "reason": "Heuristic schema/syntax", "confidence": 0.7, "source": "llm-stub"}
-        if any(x in et for x in ["unique constraint", "constraint failed", "not null", "invalid number"]):
-            return {"action": "ASK_USER", "category": "data", "reason": "Heuristic data", "confidence": 0.6, "source": "llm-stub"}
-        return {"action": "REPHRASE", "category": "schema", "reason": "Heuristic fallback", "confidence": 0.5, "source": "llm-stub"}
+        # Cloudflare creds
+        self.cf_account = os.getenv("CF_ACCOUNT_ID")
+        self.cf_token = os.getenv("CF_API_TOKEN")
 
-    # ---------------- Cloudflare Workers AI ----------------
-    def _cf_decide(self, vendor: str, db_name: str, sql_redacted: str, error_text: str) -> Dict[str, Any]:
-        import requests
-        url = f"https://api.cloudflare.com/client/v4/accounts/{self._cf_account}/ai/run/{self.model}"
-        prompt = self._prompt(vendor, db_name, sql_redacted, error_text)
-        headers = {"Authorization": f"Bearer {self._cf_token}", "Content-Type": "application/json"}
-        resp = requests.post(url, headers=headers, json={"messages": prompt}, timeout=self.timeout_s)
-        resp.raise_for_status()
-        data = resp.json()
-        text = self._first_text(data)
-        return self._parse_json_decision(text, provider="cloudflare")
+    # ---------------- Public ----------------
 
-    # ---------------- OpenAI ----------------
-    def _openai_decide(self, vendor: str, db_name: str, sql_redacted: str, error_text: str) -> Dict[str, Any]:
-        import requests
-        url = "https://api.openai.com/v1/chat/completions"
-        prompt = self._prompt(vendor, db_name, sql_redacted, error_text)
-        body = {"model": self.model, "messages": prompt, "temperature": 0, "response_format": {"type": "json_object"}}
-        headers = {"Authorization": f"Bearer {self._openai_key}", "Content-Type": "application/json"}
-        resp = requests.post(url, headers=headers, json=body, timeout=self.timeout_s)
-        resp.raise_for_status()
-        data = resp.json()
-        text = data["choices"][0]["message"]["content"]
-        return self._parse_json_decision(text, provider="openai")
-
-    # ---------------- Helpers ----------------
-    def _first_text(self, data: Dict[str, Any]) -> str:
+    def decide(
+        self,
+        vendor: str,
+        db_name: str,
+        sql_redacted: str,
+        error_text: str,
+        *,
+        retry_count: int = 0,
+        exec_phase: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Return dict {action, category, reason, confidence, source}
+        """
+        start = time.time()
         try:
-            return data["result"]["response"][0]["content"][0]["text"]
-        except Exception:
-            pass
-        try:
-            return data["result"]["message"]["content"][0]["text"]
-        except Exception:
-            pass
-        try:
-            return data["result"]["output_text"]
-        except Exception:
-            pass
-        return json.dumps(data)
+            raw = self._call_cloudflare(
+                vendor=vendor,
+                db_name=db_name,
+                sql_redacted=_safe_str(sql_redacted, 160),
+                error_text=_safe_str(error_text, 850),
+                retry_count=retry_count,
+                exec_phase=exec_phase or "execute",
+            )
+            parsed = self._postprocess(raw)
+        except Exception as e:
+            # Hard fallback: safe default
+            parsed = {
+                "action": "REPHRASE",
+                "category": "schema",
+                "reason": f"LLM fallback ({type(e).__name__})",
+                "confidence": 0.5,
+                "source": "llm-cloudflare",
+            }
 
-    def _prompt(self, vendor: str, db_name: str, sql_redacted: str, error_text: str) -> Any:
+        # Attach standard source tag and cap confidence
+        parsed["source"] = "llm-cloudflare"
+        try:
+            c = float(parsed.get("confidence", 0.7))
+        except Exception:
+            c = 0.7
+        parsed["confidence"] = max(0.0, min(1.0, c))
+
+        # Shape final output
+        return {
+            "action": _normalize_action(parsed.get("action")),
+            "category": _normalize_category(parsed.get("category")),
+            "reason": parsed.get("reason", "LLM decision").strip()[:240],
+            "confidence": parsed["confidence"],
+            "source": "llm-cloudflare",
+        }
+
+    # ---------------- Internals ----------------
+
+    def _call_cloudflare(
+        self,
+        *,
+        vendor: str,
+        db_name: str,
+        sql_redacted: str,
+        error_text: str,
+        retry_count: int,
+        exec_phase: str,
+    ) -> str:
+        if self.provider != "cloudflare":
+            raise RuntimeError(f"Unsupported provider: {self.provider}")
+
+        if not (self.cf_account and self.cf_token):
+            raise RuntimeError("Cloudflare credentials missing (CF_ACCOUNT_ID / CF_API_TOKEN)")
+
+        url = f"https://api.cloudflare.com/client/v4/accounts/{self.cf_account}/ai/run/{self.model}"
+        headers = {"Authorization": f"Bearer {self.cf_token}", "Content-Type": "application/json"}
+
         system = (
-            "You are an error decider for database query agents. "
-            "Return ONLY a compact JSON object with keys: action, category, reason, confidence. "
-            "Valid actions: QUIT, RETRY, REPHRASE, ASK_USER. "
-            "Categories: auth, connectivity, syntax, schema, transient, data. "
-            "Be conservative; prefer QUIT for auth/connectivity, RETRY for transient, REPHRASE for schema/syntax."
+            "You are a reliable classifier for database error handling. "
+            "Always return STRICT JSON with keys: action, category, reason, confidence. "
+            "No prose, no markdown, only a single JSON object."
         )
-        user = f"db_vendor={vendor}\ndb_name={db_name}\nsql_redacted={sql_redacted}\nerror_text={error_text}\n"
-        return [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
 
-    def _parse_json_decision(self, text: str, provider: str) -> Dict[str, Any]:
-        cleaned = text.strip()
-        cleaned = re.sub(r"^```json\s*|\s*```$", "", cleaned, flags=re.DOTALL)
+        user = {
+            "task": "Classify the database error into an action and category.",
+            "schema": {
+                "action": "QUIT|RETRY|REPHRASE|ASK_USER",
+                "category": "auth|connectivity|schema|data|encoding|transient|other",
+                "reason": "short explanation (<= 180 chars)",
+                "confidence": "0.0..1.0 (float)",
+            },
+            "hints": [
+                "auth → bad credentials or permission denied",
+                "connectivity → network/listener/dns/timeouts",
+                "schema → syntax errors, invalid identifiers, missing objects",
+                "data → constraint violations, type/cast errors",
+                "encoding → invalid byte sequence / character set errors",
+                "transient → deadlocks, timeouts, locked, snapshot too old (retryable)",
+            ],
+            "context": {
+                "vendor": vendor,
+                "db_name": db_name,
+                "exec_phase": exec_phase,
+                "retry_count": retry_count,
+                "sql_redacted_prefix": sql_redacted,
+                "error_text": error_text,
+            },
+            "constraints": [
+                "If credentials/permission-related → action=QUIT, category=auth",
+                "If dropped connection / DNS / listener → action=QUIT, category=connectivity",
+                "If deadlock/locked/snapshot-too-old → action=RETRY, category=transient",
+                "If missing table/view/column or syntax → action=REPHRASE, category=schema",
+                "If unique/PK/NOT NULL/type-cast → action=ASK_USER or REPHRASE, category=data",
+                "Never invent SQL. Do not return anything other than JSON.",
+            ],
+        }
+
+        body = {
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+            ],
+            # Some CF models accept params under top-level. If rejected, remove these two lines.
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
+        resp = requests.post(url, headers=headers, json=body, timeout=self.timeout_sec)
+        if resp.status_code != 200:
+            raise RuntimeError(f"CF HTTP {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        if not data.get("success"):
+            raise RuntimeError(f"CF API error: {data.get('errors') or data.get('messages')}")
+        # CF returns {"result":{"response":"..."}}
+        result = data.get("result") or {}
+        return result.get("response") or ""
+
+    def _postprocess(self, raw: str) -> Dict[str, Any]:
+        """
+        'raw' is expected to be a JSON string like:
+          {"action":"REPHRASE","category":"schema","reason":"...","confidence":0.7}
+
+        If the model returned quoted JSON, parse twice. If anything goes wrong,
+        return a safe, normalized object.
+        """
+        s = (raw or "").strip()
+        if not s:
+            return {"action": "REPHRASE", "category": "schema", "reason": "Empty LLM response", "confidence": 0.5}
+
+        # Some CF models return JSON-as-string
         try:
-            obj = json.loads(cleaned)
+            obj = json.loads(s)
         except Exception:
-            return {"action": "REPHRASE", "category": "schema", "reason": "LLM parse failure", "confidence": 0.5, "source": f"llm-{provider}-fallback"}
-        action = str(obj.get("action", "REPHRASE")).upper()
-        category = str(obj.get("category", "schema")).lower()
-        reason = obj.get("reason", "LLM decision")
-        conf = float(obj.get("confidence", 0.7))
-        if action not in {"QUIT", "RETRY", "REPHRASE", "ASK_USER"}:
-            action = "REPHRASE"
-        return {"action": action, "category": category, "reason": reason, "confidence": conf, "source": f"llm-{provider}"}
+            # maybe it's quoted JSON
+            try:
+                obj = json.loads(json.loads(s))
+            except Exception:
+                return {"action": "REPHRASE", "category": "schema", "reason": "Unparseable LLM JSON", "confidence": 0.5}
 
-    # ---------------- Public API ----------------
-    def decide(self, vendor: str, db_name: str, sql_redacted: str, error_text: str) -> Dict[str, Any]:
-        if self.provider == "cloudflare":
-            try:
-                return self._cf_decide(vendor, db_name, sql_redacted, error_text)
-            except Exception:
-                return self._stub_decide(vendor, db_name, sql_redacted, error_text)
-        if self.provider == "openai":
-            try:
-                return self._openai_decide(vendor, db_name, sql_redacted, error_text)
-            except Exception:
-                return self._stub_decide(vendor, db_name, sql_redacted, error_text)
-        return self._stub_decide(vendor, db_name, sql_redacted, error_text)
+        if not isinstance(obj, dict):
+            return {"action": "REPHRASE", "category": "schema", "reason": "Non-object LLM JSON", "confidence": 0.5}
+
+        # Normalize fields
+        action = _normalize_action(obj.get("action"))
+        category = _normalize_category(obj.get("category"))
+        reason = _safe_str(obj.get("reason", "LLM decision"), 180)
+        try:
+            conf = float(obj.get("confidence", 0.7))
+        except Exception:
+            conf = 0.7
+
+        return {"action": action, "category": category, "reason": reason, "confidence": conf}
