@@ -51,3 +51,9 @@ htmlcov/
 .tox/
 .pytest_cache/
 .mypy_cache/
+
+
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+.pytest_cache/
